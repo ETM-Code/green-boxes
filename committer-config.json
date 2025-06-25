@@ -1,0 +1,23 @@
+{
+    "_comment": "Git Committer Configuration",
+    "start_date": "2024-01-01",
+    "end_date": "2025-06-25",
+    "repo_name": "green",
+    "github_username": "ETM-Code",
+    "git_user_name": "ETM-Code",
+    "git_user_email": "eoghancollins0@gmail.com",
+    "commit_interval_seconds": 0,
+    "batch_size": 2500,
+    "max_commits_per_day": 144,
+    "max_workers": 8,
+    "push_queue_size": 3,
+    "commit_method": "fast_plumbing",
+    "_notes": {
+      "start_date": "YYYY-MM-DD format",
+      "end_date": "YYYY-MM-DD format",
+      "commit_interval_seconds": "0 to use max_commits_per_day",
+      "batch_size": "Commits before pushing. Can be much larger with fast_plumbing.",
+      "max_commits_per_day": "1440 = 1 per minute for 24 hours",
+      "commit_method": "Use 'fast_plumbing' for extreme speed or 'safe' for the original, slower method."
+    }
+}
