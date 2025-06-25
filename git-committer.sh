@@ -104,28 +104,47 @@ pre_calculate_blobs() {
     done
 }
 
-# Fixed gawk script that properly distributes commits evenly across all days
+# Improved gawk script that guarantees every day gets commits with proper distribution
 prepare_commit_data_gawk() {
-    local worker_id=$1; local start_commit=$2; local end_commit=$3; local period_start_ts=$4; local total_days=$5; local commits_per_day=$6
+    local worker_id=$1; local start_commit=$2; local end_commit=$3; local period_start_ts=$4; local total_days=$5; local total_commits=$6
     local worker_file="$COMMIT_QUEUE_DIR/worker_${worker_id}.txt"
-    gawk -v start="$start_commit" -v end="$end_commit" -v period_start_ts="$period_start_ts" -v total_days="$total_days" -v commits_per_day="$commits_per_day" \
+    gawk -v start="$start_commit" -v end="$end_commit" -v period_start_ts="$period_start_ts" -v total_days="$total_days" -v total_commits="$total_commits" \
     'BEGIN { 
         seconds_per_day = 86400;
         
         for (i = start; i <= end; i++) {
-            # Calculate which day this commit belongs to (0-based)
-            day_index = int((i - 1) / commits_per_day);
+            # Use round-robin distribution to ensure every day gets commits
+            # This guarantees no days are skipped
+            day_index = (i - 1) % total_days;
             
-            # Calculate position within that day (0 to commits_per_day-1)
-            position_in_day = (i - 1) % commits_per_day;
+            # Calculate how many commits this day should get
+            base_commits_per_day = int(total_commits / total_days);
+            extra_commits = total_commits % total_days;
+            
+            # Days 0 to (extra_commits-1) get one extra commit
+            commits_this_day = base_commits_per_day;
+            if (day_index < extra_commits) {
+                commits_this_day++;
+            }
+            
+            # Calculate which commit number this is for this specific day
+            commits_before_this_day = 0;
+            for (d = 0; d < day_index; d++) {
+                day_commits = base_commits_per_day;
+                if (d < extra_commits) day_commits++;
+                commits_before_this_day += day_commits;
+            }
+            
+            # Position within this day (0-based)
+            position_in_day = int((i - 1 - commits_before_this_day) / total_days);
             
             # Calculate base timestamp for this day
             day_start_ts = period_start_ts + (day_index * seconds_per_day);
             
-            # Distribute commits evenly throughout the day
-            if (commits_per_day > 1) {
+            # Distribute commits throughout the day
+            if (commits_this_day > 1) {
                 # Spread commits across the day with some randomness
-                time_offset = (position_in_day * seconds_per_day) / commits_per_day;
+                time_offset = (position_in_day * seconds_per_day) / commits_this_day;
                 # Add some random variation (±30 minutes) to make it look more natural
                 random_offset = (rand() - 0.5) * 3600; # ±30 minutes in seconds
                 current_ts = day_start_ts + time_offset + random_offset;
@@ -179,7 +198,7 @@ make_commits_plumbing_ultimate() {
 get_current_branch() { git branch --show-current 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main"; }
 
 prepare_batch_parallel() {
-    local batch_start=$1; local batch_end=$2; local period_start_ts=$3; local total_days=$4; local commits_per_day=$5
+    local batch_start=$1; local batch_end=$2; local period_start_ts=$3; local total_days=$4; local total_commits=$5
     local batch_size=$((batch_end - batch_start + 1))
     local commits_per_worker=$((batch_size / MAX_WORKERS)); local remaining_commits=$((batch_size % MAX_WORKERS))
     rm -f "$COMMIT_QUEUE_DIR"/worker_*.txt
@@ -191,7 +210,7 @@ prepare_batch_parallel() {
         if [[ $worker -lt $remaining_commits ]]; then worker_commits=$((worker_commits + 1)); fi
         if [[ $worker_commits -gt 0 ]]; then
             local worker_end=$((current_commit + worker_commits - 1))
-            prepare_commit_data_gawk "$worker" "$current_commit" "$worker_end" "$period_start_ts" "$total_days" "$commits_per_day" &
+            prepare_commit_data_gawk "$worker" "$current_commit" "$worker_end" "$period_start_ts" "$total_days" "$total_commits" &
             WORKER_PIDS+=($!); current_commit=$((worker_end + 1))
         fi
     done
@@ -208,7 +227,7 @@ run_committer() {
     local total_seconds=$((end_timestamp - start_timestamp))
     local total_days=$(((total_seconds + 86399) / 86400))
     
-    # Calculate commits per day and total commits
+    # Calculate commits per day and total commits - ENSURE EVERY DAY GETS AT LEAST ONE COMMIT
     local commits_per_day=$MAX_COMMITS_PER_DAY
     local total_commits=$((total_days * commits_per_day))
     
@@ -222,13 +241,29 @@ run_committer() {
         echo "Using exactly ${commits_per_day} commits per day"
     fi
     
+    # CRITICAL: Ensure we have AT LEAST one commit per day to prevent skipping days
+    if [[ $total_commits -lt $total_days ]]; then
+        echo "WARNING: Total commits ($total_commits) is less than total days ($total_days)"
+        echo "Adjusting to ensure every day gets at least one commit..."
+        total_commits=$total_days
+        commits_per_day=1
+    fi
+    
     [[ $total_commits -lt 1 ]] && total_commits=1
-    [[ $commits_per_day -lt 1 ]] && commits_per_day=1
     
     echo "Date range: $START_DATE to $END_DATE ($total_days days)"
     echo "Total commits to generate: $total_commits"
-    echo "Commits per day: $commits_per_day"
-    echo "This ensures EVERY day in the range will have commits!"
+    
+    # Calculate actual distribution
+    local base_commits_per_day=$((total_commits / total_days))
+    local extra_days=$((total_commits % total_days))
+    
+    if [[ $extra_days -eq 0 ]]; then
+        echo "Distribution: Exactly $base_commits_per_day commits per day"
+    else
+        echo "Distribution: $extra_days days get $((base_commits_per_day + 1)) commits, remaining days get $base_commits_per_day commits"
+    fi
+    echo "GUARANTEED: Every single day will have at least one commit - NO DAYS SKIPPED!"
     
     local commit_count=0; local batch_count=0; local overall_start_time=$(date +%s)
     while [[ $commit_count -lt $total_commits ]]; do
@@ -238,7 +273,7 @@ run_committer() {
         echo -e "\n--- Preparing Batch $((batch_count + 1)): Commits $batch_start-$batch_end ($batch_size) ---"
         
         # Pass the parameters needed for proper daily distribution
-        prepare_batch_parallel "$batch_start" "$batch_end" "$start_timestamp" "$total_days" "$commits_per_day"
+        prepare_batch_parallel "$batch_start" "$batch_end" "$start_timestamp" "$total_days" "$total_commits"
 
         echo "Executing batch..."
         local batch_start_time=$(date +%s)
